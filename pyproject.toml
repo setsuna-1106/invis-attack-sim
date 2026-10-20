@@ -1,0 +1,10 @@
+[project]
+name = "invis-attack-sim"
+version = "0.1.0"
+description = "BedWars 隐身药水使用与对局数据模拟"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
