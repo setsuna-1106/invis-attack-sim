@@ -62,6 +62,39 @@ def plot_density(rows: list[dict], summary: dict, output: Path) -> None:
         fig.savefig(output / "density.svg")
         plt.close(fig)
 
+    # A separate density figure makes the time-dependent first-event rate
+    # directly usable without the cumulative-probability panel.
+    from matplotlib import font_manager
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    chinese_font = next((name for name in ("PingFang SC", "Noto Sans CJK SC",
+                                          "Microsoft YaHei", "Arial Unicode MS")
+                         if name in available), None)
+    style = {"font.size": 11, "axes.spines.top": False, "axes.spines.right": False}
+    if chinese_font:
+        style["font.family"] = chinese_font
+    with plt.rc_context(style):
+        fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
+        ax.stairs(density, edges, fill=True, alpha=.5, color="#28668c", linewidth=.9)
+        width = rows[0]["end_s"] - rows[0]["start_s"]
+        if chinese_font:
+            title = "不同时刻首次受到隐身攻击的概率密度"
+            xlabel, ylabel = "开局后的时间（分钟）", "概率密度（每秒）"
+            annotation = (f"模拟 {summary['trials']:,} 局 · 分箱 {width:g} 秒\n"
+                          f"遭遇概率 {summary['density_integral']:.2%} · "
+                          f"未遭遇概率 {summary['none_probability']:.2%}")
+        else:
+            title = "First invisible attack: probability density over time"
+            xlabel, ylabel = "Time since game start (min)", "Probability density (1/s)"
+            annotation = (f"N={summary['trials']:,} | bin={width:g}s\n"
+                          f"Event: {summary['density_integral']:.2%} | "
+                          f"No event: {summary['none_probability']:.2%}")
+        ax.set(title=title, xlabel=xlabel, ylabel=ylabel, xlim=(0, edges[-1]), ylim=(0, None))
+        ax.text(.98, .95, annotation, transform=ax.transAxes, ha="right", va="top")
+        ax.grid(axis="y", alpha=.2)
+        fig.savefig(output / "attack_density.png", dpi=180)
+        fig.savefig(output / "attack_density.svg")
+        plt.close(fig)
+
 
 def export_run(trials: list[Trial], config: Config, output: Path,
                elapsed: float, *, plot: bool = True) -> dict:

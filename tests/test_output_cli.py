@@ -53,6 +53,8 @@ class OutputCliTests(unittest.TestCase):
             self.assertEqual(summary['none_probability'], 1)
             self.assertGreater((output / 'run/density.png').stat().st_size, 1000)
             self.assertTrue((output / 'run/density.svg').exists())
+            self.assertGreater((output / 'run/attack_density.png').stat().st_size, 1000)
+            self.assertTrue((output / 'run/attack_density.svg').exists())
 
     def test_small_stability_report_and_invalid_sizes(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):

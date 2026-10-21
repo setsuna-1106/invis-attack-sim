@@ -21,12 +21,13 @@ uv run --no-sync invis-attack-sim run --config configs/default.json --output out
 uv run --no-sync python -m invis_attack_sim run --trials 1000 --seed 43 --output outputs/quick
 ```
 
-`--audit` 会在每个事件后检查库存、行动和玩家状态约束。5 秒只用于结果分箱，模拟按事件时间推进。当前 macOS 环境使用普通 wheel 安装；修改源码后需重新 `uv sync --no-editable`，运行时保留 `--no-sync`。
+`--audit` 会在每个事件后检查库存、行动和玩家状态约束。5 秒只用于结果分箱，模拟按事件时间推进。当前 macOS 环境使用普通 wheel 安装；修改源码后使用 `uv sync --no-editable --reinstall-package invis-attack-sim` 确保源码重新安装，运行时保留 `--no-sync`。
 
 每次运行导出：
 
 | 文件 | 内容 |
 | --- | --- |
+| `attack_density.png` / `attack_density.svg` | 独立的时间概率密度图，横轴为分钟、纵轴为每秒密度 |
 | `density.png` / `density.svg` | 首次攻击概率密度与累计概率 |
 | `histogram.csv` | 箱起止时间、次数、概率及每秒密度 |
 | `trials.csv` | 逐局首次事件时间、停止时间、原因及攻击来源 |
