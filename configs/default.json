@@ -1,0 +1,48 @@
+{
+  "trials": 10000,
+  "seed": 42,
+  "horizon": 1800.0,
+  "bin_width": 5.0,
+  "our_team": 0,
+  "walk_time": 10.0,
+  "build_time": 60.0,
+  "respawn_time": 5.0,
+  "boundary": 0.25,
+  "potion_cost": 2,
+  "invis_duration": 30.0,
+  "generator_cap": 4,
+  "spawn_periods": [
+    56.0,
+    40.0,
+    28.0
+  ],
+  "upgrade_times": [
+    360.0,
+    1080.0
+  ],
+  "collection_start": 0.8,
+  "collection_end": 0.3,
+  "invis_share_start": 0.2,
+  "invis_share_end": 0.7,
+  "contested_wait": [
+    10.0,
+    90.0
+  ],
+  "encounter_wait": [
+    2.0,
+    5.0
+  ],
+  "break_time": [
+    15.0,
+    40.0
+  ],
+  "pursuit_time": [
+    5.0,
+    20.0
+  ],
+  "normal_break_chance": 0.1,
+  "invis_break_chance": 0.6,
+  "death_chance": 0.6,
+  "pursue_chance": 0.5,
+  "kill_chance": 0.6
+}
