@@ -90,8 +90,9 @@ class EngineTests(unittest.TestCase):
                 self.assertFalse(p.potion)
                 self.assertEqual(p.invis_until, 30)
                 advance(game, expected)
-                self.assertEqual(game.result.event_time, expected)
-                self.assertEqual(game.result.attacker, 1)
+                self.assertIsNone(game.result)
+                self.assertEqual(game.attacks[0].time, expected)
+                self.assertEqual(game.attacks[0].attacker, 1)
 
     def test_bed_loss_and_expiry_precede_equal_time_crossing(self):
         game = self.game(invis_duration=2.5)
@@ -101,6 +102,7 @@ class EngineTests(unittest.TestCase):
         game.continue_action(p, 'raid_middle')
         advance(game, 2.5)
         self.assertIsNone(game.result)
+        self.assertEqual(game.attacks, [])
         game = self.game(normal_break_chance=1)
         game.bridges[0] = True
         p = self.at_middle(game, 1, 'invis')
@@ -121,7 +123,8 @@ class EngineTests(unittest.TestCase):
         p.target = 0
         game.continue_action(p, 'raid_middle')
         advance(game, 5)
-        self.assertEqual(game.result.event_time, 5)
+        self.assertIsNone(game.result)
+        self.assertEqual(game.attacks[0].time, 5)
 
     def test_solo_collects_all_even_if_already_enough(self):
         game = self.game()
@@ -321,10 +324,38 @@ class EngineTests(unittest.TestCase):
         first = simulate(config, validate=True)
         self.assertEqual(first, simulate(config, validate=True))
         self.assertNotEqual(first, simulate(replace(config, seed=43)))
-        none = sum(t.event_time is None for t in first) / len(first)
-        self.assertAlmostEqual(sum(r['probability'] for r in histogram(first, config)) + none, 1)
+        mean_attacks = sum(len(t.attacks) for t in first) / len(first)
+        self.assertAlmostEqual(sum(r['mean_count'] for r in histogram(first, config)), mean_attacks)
         self.assertTrue(all(0 <= t.stop_time <= config.horizon for t in first))
-        self.assertTrue(all(t.attacker != config.our_team for t in first if t.event_time is not None))
+        self.assertTrue(all(a.attacker != config.our_team for t in first for a in t.attacks))
+        self.assertTrue(all(a.time <= t.stop_time for t in first for a in t.attacks))
+        self.assertTrue(all(t.stop_reason != "attack" for t in first))
+
+    def test_multiple_attackers_and_duplicate_crossing(self):
+        game = self.game()
+        game.bridges = [True] * 4
+        for team in (1, 2):
+            p = self.at_middle(game, team, 'invis')
+            p.target = 0
+            game.continue_action(p, 'raid_middle')
+        advance(game, 2.5)
+        self.assertIsNone(game.result)
+        self.assertEqual(len(game.attacks), 2)
+        self.assertEqual({a.attacker for a in game.attacks}, {1, 2})
+        p = game.players[1]
+        game.cross(p, p.motion.token)
+        self.assertEqual(len(game.attacks), 2)
+        game.players[0].bed = False
+        game.check_stop()
+        self.assertEqual(game.result.stop_reason, 'bed_destroyed')
+        self.assertEqual(len(game.result.attacks), 2)
+
+    def test_full_match_retains_repeat_attacks_until_horizon(self):
+        config = Config(trials=10, normal_break_chance=0, invis_break_chance=0)
+        trials = simulate(config, validate=True)
+        self.assertTrue(all(t.stop_reason == 'horizon' for t in trials))
+        self.assertTrue(any(len(t.attacks) > 1 for t in trials))
+        self.assertTrue(any(len({a.attacker for a in t.attacks}) < len(t.attacks) for t in trials))
 
     def test_game_end_counts_respawning_team_as_not_eliminated(self):
         game = self.game()

@@ -11,9 +11,9 @@ import itertools
 import random
 
 from .config import Config
-from .results import Trial
+from .results import Attack, Trial
 
-MODEL_VERSION = "m1.1"
+MODEL_VERSION = "m1.2"
 
 
 @dataclass
@@ -26,6 +26,7 @@ class Motion:
     token: int
     building: bool
     continuation: str
+    attack_recorded: bool = False
 
 
 @dataclass
@@ -65,6 +66,7 @@ class Game:
         self.refresh_pending = False
         self.pairs_pending = False
         self.result: Trial | None = None
+        self.attacks: list[Attack] = []
         self.trace = [] if trace else None
         self.validate = validate
         self.events_processed = 0
@@ -143,10 +145,9 @@ class Game:
         else:
             raise RuntimeError(f"unknown event {kind}")
 
-    def finish(self, reason: str, attacker: int | None = None) -> None:
+    def finish(self, reason: str) -> None:
         if self.result is None:
-            self.result = Trial(self.trial_id, self.time if reason == "attack" else None,
-                                self.time, reason, attacker)
+            self.result = Trial(self.trial_id, tuple(self.attacks), self.time, reason)
 
     def check_stop(self) -> None:
         own = self.players[self.c.our_team]
@@ -249,11 +250,12 @@ class Game:
 
     def cross(self, p: Player, token: int) -> None:
         if (p.alive and p.motion is not None and p.motion.token == token
-                and p.invis_until > self.time):
+                and not p.motion.attack_recorded and p.invis_until > self.time):
             self.check_stop()
             if self.result is None:
                 self.record("attack", player=p.team)
-                self.finish("attack", p.team)
+                p.motion.attack_recorded = True
+                self.attacks.append(Attack(self.time, p.team))
 
     def target_valid(self, p: Player) -> bool:
         if p.target is None or self.players[p.target].eliminated:

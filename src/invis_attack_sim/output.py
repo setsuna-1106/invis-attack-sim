@@ -1,8 +1,8 @@
-"""Portable CSV/JSON results and Matplotlib figures (headless backend)."""
+"""Portable all-attack CSV/JSON results and headless Matplotlib figures."""
 
 from collections import Counter
+from collections.abc import Iterable
 import csv
-from dataclasses import asdict
 import hashlib
 import json
 import math
@@ -11,7 +11,7 @@ import platform
 
 from .config import Config
 from .engine import MODEL_VERSION
-from .results import Trial, histogram
+from .results import Trial, histogram, mean_count_curve
 
 
 def write_json(path: Path, value) -> None:
@@ -26,7 +26,7 @@ def source_fingerprint() -> str:
     return digest.hexdigest()
 
 
-def write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
+def write_csv(path: Path, rows: Iterable[dict], fields: list[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
@@ -37,34 +37,8 @@ def plot_density(rows: list[dict], summary: dict, output: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-
-    edges = [row["start_s"] / 60 for row in rows] + [rows[-1]["end_s"] / 60]
-    density = [row["density_per_s"] for row in rows]
-    cumulative = []
-    mass = 0.0
-    for row in rows:
-        mass += row["probability"]
-        cumulative.append(mass)
-    with plt.rc_context({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False}):
-        fig, (ax, cdf) = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True,
-                                      gridspec_kw={"height_ratios": [2, 1]}, layout="constrained")
-        ax.stairs(density, edges, fill=True, alpha=.4, color="#28668c", linewidth=.8)
-        ax.set(ylabel="Probability density (1/s)", title="First invisible entry toward our base")
-        ax.text(.98, .95, f"N = {summary['trials']:,}  |  seed = {summary['seed']}\n"
-                f"No event before stop: {summary['none_probability']:.2%}",
-                transform=ax.transAxes, ha="right", va="top")
-        cdf.step(edges, [0] + cumulative, where="post", color="#28668c")
-        cdf.set(xlabel="Time since game start (min)", ylabel="Cumulative probability",
-                xlim=(0, edges[-1]), ylim=(0, 1))
-        for axis in (ax, cdf):
-            axis.grid(axis="y", alpha=.2)
-        fig.savefig(output / "density.png", dpi=160)
-        fig.savefig(output / "density.svg")
-        plt.close(fig)
-
-    # A separate density figure makes the time-dependent first-event rate
-    # directly usable without the cumulative-probability panel.
     from matplotlib import font_manager
+
     available = {font.name for font in font_manager.fontManager.ttflist}
     chinese_font = next((name for name in ("PingFang SC", "Noto Sans CJK SC",
                                           "Microsoft YaHei", "Arial Unicode MS")
@@ -72,28 +46,48 @@ def plot_density(rows: list[dict], summary: dict, output: Path) -> None:
     style = {"font.size": 11, "axes.spines.top": False, "axes.spines.right": False}
     if chinese_font:
         style["font.family"] = chinese_font
+    edges = [row["start_s"] / 60 for row in rows] + [rows[-1]["end_s"] / 60]
+    width = rows[0]["end_s"] - rows[0]["start_s"]
+    if chinese_font:
+        xlabel = "开局后的时间（分钟）"
+        titles = ("不同时刻受到隐身攻击的事件密度（计入所有次数）",
+                  f"各 {width:g} 秒区间内至少受到一次隐身攻击的概率")
+        ylabels = ("攻击事件密度［次 /（局·秒）］", "至少一次攻击的概率")
+        note = (f"模拟 {summary['trials']:,} 局 · 分箱 {width:g} 秒\n"
+                f"每局平均 {summary['mean_attacks']:.3f} 次 · "
+                f"零攻击对局 {summary['none_probability']:.2%}")
+    else:
+        xlabel = "Time since game start (min)"
+        titles = ("Invisible attack intensity over time (all attacks)",
+                  f"Probability of at least one invisible attack per {width:g}s interval")
+        ylabels = ("Attack intensity (attacks / trial / s)", "Probability of at least one attack")
+        note = (f"N={summary['trials']:,} | bin={width:g}s\n"
+                f"Mean attacks={summary['mean_attacks']:.3f} | "
+                f"Zero-attack trials={summary['none_probability']:.2%}")
+    series = ([row["density_per_s"] for row in rows],
+              [row["hit_probability"] for row in rows])
     with plt.rc_context(style):
-        fig, ax = plt.subplots(figsize=(11, 5), layout="constrained")
-        ax.stairs(density, edges, fill=True, alpha=.5, color="#28668c", linewidth=.9)
-        width = rows[0]["end_s"] - rows[0]["start_s"]
-        if chinese_font:
-            title = "不同时刻首次受到隐身攻击的概率密度"
-            xlabel, ylabel = "开局后的时间（分钟）", "概率密度（每秒）"
-            annotation = (f"模拟 {summary['trials']:,} 局 · 分箱 {width:g} 秒\n"
-                          f"遭遇概率 {summary['density_integral']:.2%} · "
-                          f"未遭遇概率 {summary['none_probability']:.2%}")
-        else:
-            title = "First invisible attack: probability density over time"
-            xlabel, ylabel = "Time since game start (min)", "Probability density (1/s)"
-            annotation = (f"N={summary['trials']:,} | bin={width:g}s\n"
-                          f"Event: {summary['density_integral']:.2%} | "
-                          f"No event: {summary['none_probability']:.2%}")
-        ax.set(title=title, xlabel=xlabel, ylabel=ylabel, xlim=(0, edges[-1]), ylim=(0, None))
-        ax.text(.98, .95, annotation, transform=ax.transAxes, ha="right", va="top")
-        ax.grid(axis="y", alpha=.2)
-        fig.savefig(output / "attack_density.png", dpi=180)
-        fig.savefig(output / "attack_density.svg")
+        def draw(axis, index):
+            axis.stairs(series[index], edges, fill=True, alpha=.5, color="#28668c", linewidth=.9)
+            axis.set(title=titles[index], ylabel=ylabels[index], xlim=(0, edges[-1]), ylim=(0, None))
+            axis.grid(axis="y", alpha=.2)
+
+        fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True, layout="constrained")
+        for index, axis in enumerate(axes):
+            draw(axis, index)
+        axes[0].text(.98, .95, note, transform=axes[0].transAxes, ha="right", va="top")
+        axes[-1].set_xlabel(xlabel)
+        fig.savefig(output / "density.png", dpi=160)
+        fig.savefig(output / "density.svg")
         plt.close(fig)
+        for index, filename in enumerate(("attack_density", "interval_probability")):
+            fig, axis = plt.subplots(figsize=(11, 5), layout="constrained")
+            draw(axis, index)
+            axis.set_xlabel(xlabel)
+            axis.text(.98, .95, note, transform=axis.transAxes, ha="right", va="top")
+            fig.savefig(output / f"{filename}.png", dpi=180)
+            fig.savefig(output / f"{filename}.svg")
+            plt.close(fig)
 
 
 def export_run(trials: list[Trial], config: Config, output: Path,
@@ -101,23 +95,34 @@ def export_run(trials: list[Trial], config: Config, output: Path,
     if len(trials) != config.trials:
         raise ValueError("trial count does not match configuration")
     rows = histogram(trials, config)
-    none = sum(t.event_time is None for t in trials)
+    none = sum(not trial.attacks for trial in trials)
+    total_attacks = sum(len(trial.attacks) for trial in trials)
+    mean_attacks = total_attacks / len(trials)
     integral = sum(row["density_per_s"] * config.bin_width for row in rows)
-    total = integral + none / len(trials)
-    if not math.isclose(total, 1, abs_tol=1e-12):
-        raise RuntimeError("probability normalization failed")
-    summary = dict(model_version=MODEL_VERSION, source_sha256=source_fingerprint(),
+    if not math.isclose(integral, mean_attacks, rel_tol=1e-12, abs_tol=1e-12):
+        raise RuntimeError("attack intensity integral must equal mean attacks per trial")
+    summary = dict(schema_version=2, model_version=MODEL_VERSION, source_sha256=source_fingerprint(),
                    python_version=platform.python_version(), config=config.to_dict(),
-                   trials=len(trials), seed=config.seed, events=len(trials) - none,
-                   no_events=none, none_probability=none / len(trials),
-                   density_integral=integral, probability_total=total,
+                   trials=len(trials), seed=config.seed, total_attacks=total_attacks,
+                   attacked_trials=len(trials) - none, zero_attack_trials=none,
+                   mean_attacks=mean_attacks, none_probability=none / len(trials),
+                   ever_attacked_probability=1 - none / len(trials),
+                   density_integral=integral,
+                   probability_total=(len(trials) - none) / len(trials) + none / len(trials),
                    stop_reasons=dict(Counter(t.stop_reason for t in trials)),
                    runtime_seconds=elapsed,
-                   interpretation="Simplified model; no-event mass includes early bed loss and game end. Not calibrated to real matches.")
+                   intensity_definition="All attacks in a bin / (all trials * bin width). Integral is mean attack count, not a probability. hit_probability counts each trial at most once per bin.",
+                   interpretation="Continue after every attack; stop at own bed loss, elimination, game end or horizon. Simplified model, not calibrated to real matches.")
     output.mkdir(parents=True, exist_ok=True)
     write_csv(output / "histogram.csv", rows, list(rows[0]))
-    write_csv(output / "trials.csv", [asdict(trial) for trial in trials],
-              ["trial_id", "event_time", "stop_time", "stop_reason", "attacker"])
+    write_csv(output / "trials.csv", (dict(trial_id=trial.trial_id, attack_count=len(trial.attacks),
+              first_attack_time=trial.event_time, last_attack_time=trial.attacks[-1].time if trial.attacks else None,
+              stop_time=trial.stop_time, stop_reason=trial.stop_reason) for trial in trials),
+              ["trial_id", "attack_count", "first_attack_time", "last_attack_time", "stop_time", "stop_reason"])
+    write_csv(output / "attacks.csv", (dict(trial_id=trial.trial_id, attack_number=number,
+              time_s=attack.time, attacker=attack.attacker) for trial in trials
+              for number, attack in enumerate(trial.attacks, 1)),
+              ["trial_id", "attack_number", "time_s", "attacker"])
     write_json(output / "config.json", config.to_dict())
     write_json(output / "summary.json", summary)
     if plot:
@@ -132,13 +137,13 @@ def plot_stability(groups: list[list[Trial]], report: dict, output: Path) -> Non
 
     fig, ax = plt.subplots(figsize=(9, 5), layout="constrained")
     for trials, run in zip(groups, report["runs"]):
-        times = sorted(t.event_time / 60 for t in trials if t.event_time is not None)
-        ax.step([0] + times + [report["horizon"] / 60],
-                [0] + [(i + 1) / len(trials) for i in range(len(times))] + [len(times) / len(trials)],
+        config = Config(**report["config"])
+        edges = [i * config.bin_width / 60 for i in range(round(config.horizon / config.bin_width) + 1)]
+        ax.step(edges, [0] + mean_count_curve(trials, config),
                 where="post", label=f"N={len(trials):,}, seed={run['seed']}", linewidth=1.1)
-    ax.set(xlabel="Time since game start (min)", ylabel="Cumulative probability",
-           title=f"Monte Carlo stability: {'PASS' if report['passed'] else 'FAIL'}",
-           xlim=(0, report["horizon"] / 60), ylim=(0, 1))
+    ax.set(xlabel="Time since game start (min)", ylabel="Mean cumulative attack count per trial",
+           title=f"All-attack Monte Carlo stability: {'PASS' if report['passed'] else 'FAIL'}",
+           xlim=(0, report["horizon"] / 60), ylim=(0, None))
     ax.legend(loc="lower right")
     ax.grid(alpha=.2)
     fig.savefig(output / "stability.png", dpi=160)

@@ -1,6 +1,5 @@
 import contextlib
 import csv
-from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -23,11 +22,17 @@ class OutputCliTests(unittest.TestCase):
             with (output / 'trials.csv').open() as stream:
                 raw = list(csv.DictReader(stream))
             self.assertEqual(len(raw), 100)
-            self.assertEqual(sum(r['event_time'] == '' for r in raw), summary['no_events'])
+            self.assertEqual(sum(r['first_attack_time'] == '' for r in raw), summary['zero_attack_trials'])
             self.assertEqual(Config.load(output / 'config.json'), config)
-            self.assertEqual(summary['events'] + summary['no_events'], 100)
+            self.assertEqual(summary['attacked_trials'] + summary['zero_attack_trials'], 100)
             self.assertAlmostEqual(summary['probability_total'], 1)
             self.assertEqual(len(summary['source_sha256']), 64)
+            with (output / 'attacks.csv').open() as stream:
+                events = list(csv.DictReader(stream))
+            self.assertEqual(len(events), summary['total_attacks'])
+            self.assertEqual(sum(int(row['attack_count']) for row in raw), len(events))
+            self.assertAlmostEqual(summary['density_integral'], summary['mean_attacks'])
+            self.assertEqual(summary['mean_attacks'], len(events) / len(raw))
 
     def test_identical_seed_exports_identical_csv(self):
         config = Config(trials=50)
@@ -35,7 +40,7 @@ class OutputCliTests(unittest.TestCase):
             a, b = Path(directory) / 'a', Path(directory) / 'b'
             for output in (a, b):
                 export_run(simulate(config), config, output, 0, plot=False)
-            for name in ('trials.csv', 'histogram.csv', 'config.json'):
+            for name in ('trials.csv', 'attacks.csv', 'histogram.csv', 'config.json'):
                 self.assertEqual((a / name).read_bytes(), (b / name).read_bytes())
 
     def test_empty_events_plot_and_cli_overrides(self):
@@ -55,13 +60,14 @@ class OutputCliTests(unittest.TestCase):
             self.assertTrue((output / 'run/density.svg').exists())
             self.assertGreater((output / 'run/attack_density.png').stat().st_size, 1000)
             self.assertTrue((output / 'run/attack_density.svg').exists())
+            self.assertTrue((output / 'run/interval_probability.png').exists())
 
     def test_small_stability_report_and_invalid_sizes(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            report = run_stability(Config(horizon=5), [10, 20, 40], Path(directory), audit=True, plot=False)
+            report = run_stability(Config(horizon=5), [10, 20, 40], Path(directory), audit=True, plot=False, bootstrap_repetitions=20)
             self.assertTrue(report['passed'])
             self.assertEqual([r['seed'] for r in report['runs']], [42, 43, 44])
-            self.assertEqual(report['final_cdf_distance'], 0)
+            self.assertEqual(report['distance'], 0)
             self.assertTrue(report['state_audits'])
             with self.assertRaises(ValueError):
                 run_stability(Config(), [10, 10, 40], Path(directory), plot=False)
