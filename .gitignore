@@ -20,3 +20,7 @@ dist/
 # Keep previous discussion paths ignored if restored accidentally
 /docs/M1.md
 /docs/M1-SPEC.md
+
+# Generated simulation results and plotting caches
+/outputs/
+/.mplconfig/
