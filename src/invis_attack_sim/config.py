@@ -30,8 +30,12 @@ class Config:
     encounter_wait: tuple[float, float] = (2.0, 5.0)
     break_time: tuple[float, float] = (15.0, 40.0)
     pursuit_time: tuple[float, float] = (5.0, 20.0)
-    normal_break_chance: float = 0.1
+    normal_break_chance: float = 0.08
+    normal_break_chance_end: float = 0.03
     invis_break_chance: float = 0.6
+    invis_break_chance_end: float = 0.4
+    no_bed_invis_odds_multiplier: float = 2.0
+    no_bed_failure_death_multiplier: float = 0.5
     death_chance: float = 0.6
     pursue_chance: float = 0.5
     kill_chance: float = 0.6
@@ -52,10 +56,15 @@ class Config:
             raise ValueError("horizon must be <= 1800 and divisible by bin_width")
         if self.build_time < self.walk_time:
             raise ValueError("build_time must include at least walk_time")
-        for name in ("boundary", "collection_start", "collection_end", "invis_share_start", "invis_share_end", "normal_break_chance", "invis_break_chance", "death_chance", "pursue_chance", "kill_chance"):
+        for name in ("boundary", "collection_start", "collection_end", "invis_share_start", "invis_share_end", "normal_break_chance", "normal_break_chance_end", "invis_break_chance", "invis_break_chance_end", "no_bed_failure_death_multiplier", "death_chance", "pursue_chance", "kill_chance"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
+        multiplier = self.no_bed_invis_odds_multiplier
+        if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or not math.isfinite(multiplier) or multiplier <= 0:
+            raise ValueError("no_bed_invis_odds_multiplier must be finite and positive")
+        if (self.normal_break_chance == 0) != (self.normal_break_chance_end == 0):
+            raise ValueError("exponential normal break endpoints must both be positive or both zero")
         if not 0 < self.boundary < 1:
             raise ValueError("boundary must be inside the route")
         for name, length in (("spawn_periods", 3), ("upgrade_times", 2), ("contested_wait", 2), ("encounter_wait", 2), ("break_time", 2), ("pursuit_time", 2)):
@@ -79,6 +88,17 @@ class Config:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def break_chance(self, time: float, *, invisible: bool) -> float:
+        """Conditional success at resolution; endpoints refer to 0 and 30 min."""
+        fraction = min(1.0, max(0.0, time / 1800))
+        if invisible:
+            return self.invis_break_chance + (self.invis_break_chance_end - self.invis_break_chance) * fraction
+        if self.normal_break_chance == 0:
+            return 0.0
+        # Interpolate in log space to avoid underflow in the endpoint ratio.
+        return math.exp((1 - fraction) * math.log(self.normal_break_chance)
+                        + fraction * math.log(self.normal_break_chance_end))
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":

@@ -1,3 +1,5 @@
+import math
+from pathlib import Path
 import unittest
 
 from invis_attack_sim.config import Config
@@ -15,9 +17,31 @@ class ConfigResultsTests(unittest.TestCase):
         for kwargs in ({"trials": 0}, {"seed": True}, {"walk_time": float('nan')},
                        {"potion_cost": 0}, {"boundary": 1}, {"death_chance": 1.1},
                        {"horizon": 1801}, {"bin_width": 7}, {"spawn_periods": [1, 2]},
-                       {"encounter_wait": [5, 2]}, {"upgrade_times": [5, 5]}):
+                       {"encounter_wait": [5, 2]}, {"upgrade_times": [5, 5]},
+                       {"normal_break_chance_end": -1}, {"invis_break_chance_end": True},
+                       {"normal_break_chance": 0}, {"normal_break_chance_end": 0},
+                       {"no_bed_invis_odds_multiplier": float('inf')},
+                       {"no_bed_invis_odds_multiplier": 0},
+                       {"no_bed_failure_death_multiplier": 1.1}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 Config(**kwargs)
+
+    def test_break_curves_use_game_time_and_handle_constant_zero(self):
+        config = Config()
+        for time, normal, invis in ((0, .08, .6), (900, math.sqrt(.08 * .03), .5),
+                                    (1800, .03, .4)):
+            self.assertAlmostEqual(config.break_chance(time, invisible=False), normal)
+            self.assertAlmostEqual(config.break_chance(time, invisible=True), invis)
+        self.assertEqual(Config(horizon=60).break_chance(60, invisible=False),
+                         config.break_chance(60, invisible=False))
+        zero = Config(normal_break_chance=0, normal_break_chance_end=0)
+        self.assertEqual(zero.break_chance(900, invisible=False), 0)
+        self.assertEqual(config.break_chance(-10, invisible=True), .6)
+        self.assertAlmostEqual(config.break_chance(2000, invisible=False), .03)
+
+    def test_default_file_matches_programmatic_defaults(self):
+        path = Path(__file__).resolve().parents[1] / 'configs/default.json'
+        self.assertEqual(Config.load(path), Config())
 
     def test_histogram_keeps_none_and_exact_right_edge(self):
         config = Config(horizon=10)

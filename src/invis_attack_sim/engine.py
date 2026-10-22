@@ -13,7 +13,7 @@ import random
 from .config import Config
 from .results import Attack, Trial
 
-MODEL_VERSION = "m1.2"
+MODEL_VERSION = "m1.3"
 
 
 @dataclass
@@ -181,12 +181,25 @@ class Game:
             if p.alive and p.action == "idle":
                 self.schedule(self.time, 4, "decide", p.team, p.version)
 
+    def action_weights(self, p: Player) -> list[float]:
+        collect, normal, invis = self.c.weights(self.time)
+        if not p.bed:
+            scaled_invis = self.c.no_bed_invis_odds_multiplier * invis
+            denominator = normal + scaled_invis
+            if denominator:
+                attack = normal + invis
+                normal, invis = attack * normal / denominator, attack * scaled_invis / denominator
+        return [collect, normal, invis]
+
+    def failure_death_chance(self, p: Player) -> float:
+        return self.c.death_chance * (1.0 if p.bed else self.c.no_bed_failure_death_multiplier)
+
     def decide(self, p: Player) -> None:
         if not p.alive or p.action != "idle":
             return
         normal_targets = [q.team for q in self.players if q.team != p.team and not q.eliminated]
         invis_targets = [team for team in normal_targets if self.players[team].bed]
-        weights = list(self.c.weights(self.time))
+        weights = self.action_weights(p)
         if not normal_targets:
             weights[1] = 0
         if not invis_targets or p.emeralds < self.c.potion_cost:
@@ -353,7 +366,7 @@ class Game:
         loser = self.rng.choice(pair)
         winner = pair[1] if loser == pair[0] else pair[0]
         self.record("encounter", loser=loser, winner=winner)
-        if self.rng.random() < self.c.death_chance:
+        if self.rng.random() < self.failure_death_chance(self.players[loser]):
             self.kill(self.players[loser], winner)
         else:
             self.return_home(self.players[loser])
@@ -368,7 +381,7 @@ class Game:
         if not target.bed:
             self.start_pursuit(p)
             return
-        chance = self.c.invis_break_chance if p.action == "invis" else self.c.normal_break_chance
+        chance = self.c.break_chance(self.time, invisible=p.action == "invis")
         success = self.rng.random() < chance
         self.record("break", player=p.team, target=target.team, success=success)
         if not success:
@@ -410,7 +423,7 @@ class Game:
             self.fail_raid(p, target)
 
     def fail_raid(self, p: Player, target: int) -> None:
-        if self.rng.random() < self.c.death_chance:
+        if self.rng.random() < self.failure_death_chance(p):
             self.kill(p, target)
         else:
             self.return_home(p)

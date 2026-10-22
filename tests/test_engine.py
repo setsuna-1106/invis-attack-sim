@@ -2,6 +2,7 @@ from dataclasses import replace
 import heapq
 import random
 import unittest
+from unittest.mock import patch
 
 from invis_attack_sim.config import Config
 from invis_attack_sim.engine import Game, simulate
@@ -32,6 +33,66 @@ class EngineTests(unittest.TestCase):
         p = game.players[team]
         p.route, p.x, p.action, p.emeralds = None, 0.0, action, emeralds
         return p
+
+    def test_no_bed_preference_preserves_collect_and_total_attack(self):
+        game = Game(Config(), random.Random(42))
+        game.time = 900
+        p = game.players[1]
+        base = game.action_weights(p)
+        p.bed = False
+        changed = game.action_weights(p)
+        self.assertEqual(changed[0], base[0])
+        self.assertAlmostEqual(sum(changed[1:]), sum(base[1:]))
+        self.assertAlmostEqual(changed[2] / changed[1], 2 * base[2] / base[1])
+        p.emeralds = 0
+        with patch.object(game.rng, 'choices', return_value=['normal']) as choose:
+            game.decide(p)
+        self.assertEqual(choose.call_args.kwargs['weights'][2], 0)
+        self.assertGreater(choose.call_args.kwargs['weights'][1], 0)
+        self.assertEqual(p.action, 'normal')  # No forced preparation collection.
+
+    def test_break_resolution_uses_current_time_and_action(self):
+        for action, threshold in (('normal', .05), ('invis', .5)):
+            for time, expected in ((0, True), (1800, False)):
+                with self.subTest(action=action, time=time):
+                    game = self.game()
+                    p = game.players[1]
+                    p.action, p.target = action, 2
+                    game.time = time
+                    with patch.object(game.rng, 'random', return_value=threshold):
+                        game.resolve_break(p)
+                    event = next(e for e in game.trace if e['kind'] == 'break')
+                    self.assertEqual(event['success'], expected)
+
+    def test_retreat_changes_both_failure_paths_only_after_bed_loss(self):
+        for encounter in (False, True):
+            for bed in (False, True):
+                with self.subTest(encounter=encounter, bed=bed):
+                    game = self.game()
+                    p = game.players[1]
+                    p.bed, p.emeralds, p.action = bed, 3, 'normal'
+                    self.assertAlmostEqual(game.failure_death_chance(p), .6 if bed else .3)
+                    with patch.object(game.rng, 'random', return_value=.45):
+                        if encounter:
+                            p.route, p.x = None, 0
+                            self.at_middle(game, 2, 'normal')
+                            game.pairs[(1, 2)] = 7
+                            with patch.object(game.rng, 'choice', return_value=1):
+                                game.encounter((1, 2), 7)
+                        else:
+                            game.fail_raid(p, 2)
+                    self.assertEqual(p.alive, not bed)
+                    self.assertEqual(p.emeralds, 0 if bed else 3)
+
+    def test_no_bed_retreat_does_not_reduce_pursuit_kill_probability(self):
+        game = self.game(no_bed_failure_death_multiplier=0)
+        p, target = game.players[1:3]
+        p.bed, p.action, p.target = False, 'normal', 2
+        target.bed = False
+        with patch.object(game.rng, 'random', return_value=.55):
+            game.resolve_pursuit(p)
+        self.assertTrue(target.eliminated)
+        self.assertTrue(p.alive)
 
     def test_first_build_includes_crossing_and_is_shared(self):
         game = self.game()
@@ -103,7 +164,7 @@ class EngineTests(unittest.TestCase):
         advance(game, 2.5)
         self.assertIsNone(game.result)
         self.assertEqual(game.attacks, [])
-        game = self.game(normal_break_chance=1)
+        game = self.game(normal_break_chance=1, normal_break_chance_end=1)
         game.bridges[0] = True
         p = self.at_middle(game, 1, 'invis')
         p.target = 0
@@ -255,7 +316,8 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(any(e[4] == 'respawn' for e in game.queue))
 
     def test_break_after_expiry_uses_invis_success_and_can_pursue(self):
-        game = self.game(invis_break_chance=1, normal_break_chance=0, pursue_chance=1)
+        game = self.game(invis_break_chance=1, invis_break_chance_end=1,
+                         normal_break_chance=0, normal_break_chance_end=0, pursue_chance=1)
         p = game.players[1]
         p.action, p.target, p.invis_until = 'invis', 2, 5
         game.time = 40
@@ -266,7 +328,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(any(e[4] == 'pursuit' for e in game.queue))
 
     def test_failed_break_ends_raid_and_resource_recipient_must_be_alive(self):
-        game = self.game(normal_break_chance=0, death_chance=1)
+        game = self.game(normal_break_chance=0, normal_break_chance_end=0, death_chance=1)
         p = game.players[1]
         p.action, p.target, p.emeralds = 'normal', 2, 6
         game.players[2].alive = False
@@ -351,7 +413,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(game.result.attacks), 2)
 
     def test_full_match_retains_repeat_attacks_until_horizon(self):
-        config = Config(trials=10, normal_break_chance=0, invis_break_chance=0)
+        config = Config(trials=10, normal_break_chance=0, normal_break_chance_end=0,
+                        invis_break_chance=0, invis_break_chance_end=0)
         trials = simulate(config, validate=True)
         self.assertTrue(all(t.stop_reason == 'horizon' for t in trials))
         self.assertTrue(any(len(t.attacks) > 1 for t in trials))

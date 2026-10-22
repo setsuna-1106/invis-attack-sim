@@ -40,8 +40,12 @@
     5.0,
     20.0
   ],
-  "normal_break_chance": 0.1,
+  "normal_break_chance": 0.08,
+  "normal_break_chance_end": 0.03,
   "invis_break_chance": 0.6,
+  "invis_break_chance_end": 0.4,
+  "no_bed_invis_odds_multiplier": 2.0,
+  "no_bed_failure_death_multiplier": 0.5,
   "death_chance": 0.6,
   "pursue_chance": 0.5,
   "kill_chance": 0.6
