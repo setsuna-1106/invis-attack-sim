@@ -10,6 +10,10 @@ from .config import Config
 class Attack:
     time: float
     attacker: int
+    episode: int | None = None
+    stage: str = "base"
+    attacker_bed: bool = True
+    continued_pursuit: bool = False
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,11 @@ class Trial:
     attacks: tuple[Attack, ...]
     stop_time: float
     stop_reason: str
+    bed_loss_time: float | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.stop_reason in ("eliminated", "game_end")
 
     @property
     def event_time(self) -> float | None:
@@ -25,14 +34,20 @@ class Trial:
         return self.attacks[0].time if self.attacks else None
 
 
-def histogram(trials: list[Trial], config: Config) -> list[dict]:
+def histogram(trials: list[Trial], config: Config, *, end_time: float | None = None) -> list[dict]:
     if not trials:
         raise ValueError("at least one trial is required")
-    bins = round(config.horizon / config.bin_width)
+    complete = [t for t in trials if t.complete]
+    endpoint = max((t.stop_time for t in complete), default=0) if end_time is None else end_time
+    if not math.isfinite(endpoint) or endpoint < max((t.stop_time for t in complete), default=0):
+        raise ValueError("common time axis must cover all complete observation endpoints")
+    bins = max(1, math.ceil(endpoint / config.bin_width))
     counts = [0] * bins
     hit_trials = [0] * bins
+    base = [0] * bins
+    attacker_bed = [0] * bins
     for trial in trials:
-        if not math.isfinite(trial.stop_time) or not 0 <= trial.stop_time <= config.horizon:
+        if not math.isfinite(trial.stop_time) or trial.stop_time < 0:
             raise ValueError("invalid trial stop time")
         hit_bins = set()
         previous = -math.inf
@@ -42,30 +57,47 @@ def histogram(trials: list[Trial], config: Config) -> list[dict]:
             if attack.time < 0:
                 raise ValueError("attack outside observation window")
             previous = attack.time
+            if not trial.complete:
+                continue
+            if attack.stage not in ("base", "pursuit") or attack.time > bins * config.bin_width:
+                raise ValueError("invalid event stage or common time axis")
             index = min(int(attack.time / config.bin_width), bins - 1)
             counts[index] += 1
+            base[index] += attack.stage == "base"
+            attacker_bed[index] += attack.attacker_bed
             hit_bins.add(index)
         for index in hit_bins:
             hit_trials[index] += 1
-    n = len(trials)
+    n = len(complete)
+    if not n:
+        return []  # An unknown continuation cannot be represented as zero events.
     return [dict(start_s=i * config.bin_width, end_s=(i + 1) * config.bin_width,
                  count=count, mean_count=count / n,
                  density_per_s=count / (n * config.bin_width),
+                 base_count=base[i], pursuit_count=count - base[i],
+                 base_density_per_s=base[i] / (n * config.bin_width),
+                 pursuit_density_per_s=(count - base[i]) / (n * config.bin_width),
+                 attacker_bed_count=attacker_bed[i], attacker_no_bed_count=count - attacker_bed[i],
+                 complete_trials=n,
                  hit_trials=hit_trials[i], hit_probability=hit_trials[i] / n)
             for i, count in enumerate(counts)]
 
 
-def mean_count_curve(trials: list[Trial], config: Config) -> list[float]:
+def mean_count_curve(trials: list[Trial], config: Config, *, end_time: float | None = None) -> list[float]:
     cumulative = 0.0
     curve = []
-    for row in histogram(trials, config):
+    for row in histogram(trials, config, end_time=end_time):
         cumulative += row["mean_count"]
         curve.append(cumulative)
     return curve
 
 
 def count_curve_distance(a: list[Trial], b: list[Trial], config: Config) -> float:
-    return max(abs(x - y) for x, y in zip(mean_count_curve(a, config), mean_count_curve(b, config)))
+    endpoint = max(t.stop_time for t in a + b if t.complete)
+    curves = [mean_count_curve(g, config, end_time=endpoint) for g in (a, b)]
+    if not all(curves):
+        raise ValueError("complete trials required for comparison")
+    return max(abs(x - y) for x, y in zip(*curves))
 
 
 def count_stability(a: list[Trial], b: list[Trial], config: Config, *,
@@ -80,7 +112,10 @@ def count_stability(a: list[Trial], b: list[Trial], config: Config, *,
 
     if type(repetitions) is not int or repetitions < 20:
         raise ValueError("at least 20 bootstrap repetitions are required")
-    curves = [np.array(mean_count_curve(group, config)) for group in (a, b)]
+    if not a or not b or not all(t.complete for t in a + b):
+        raise ValueError("stability requires fully completed runs; rerun or diagnose guards")
+    endpoint = max(t.stop_time for t in a + b)
+    curves = [np.array(mean_count_curve(group, config, end_time=endpoint)) for group in (a, b)]
     bins = len(curves[0])
     prepared = []
     for group in (a, b):

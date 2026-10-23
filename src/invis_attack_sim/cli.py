@@ -8,7 +8,7 @@ from time import perf_counter
 from .config import Config
 from .engine import MODEL_VERSION, simulate
 from .output import export_run, plot_stability, source_fingerprint, write_json
-from .results import count_curve_distance, count_stability
+from .results import count_curve_distance, count_stability, histogram
 
 
 def run_stability(config: Config, sizes: list[int], output: Path, *, audit: bool = False,
@@ -29,11 +29,17 @@ def run_stability(config: Config, sizes: list[int], output: Path, *, audit: bool
         runs.append(dict(trials=size, seed=current.seed, runtime_seconds=elapsed,
                          none_probability=summary["none_probability"], mean_attacks=summary["mean_attacks"],
                          probability_total=summary["probability_total"]))
+        if not summary["all_complete"]:
+            report = dict(model_version=MODEL_VERSION, config=config.to_dict(), runs=runs,
+                          passed=False, reason="incomplete trials; stability unavailable",
+                          incomplete_trials=summary["incomplete_trials"], distance=None, threshold_95=None)
+            write_json(output / "stability.json", report)
+            return report
         print(f"N={size:,}, seed={current.seed}: mean-attacks={summary['mean_attacks']:.6f}, zero-attacks={summary['none_probability']:.6f}, {elapsed:.2f}s", flush=True)
     comparison = count_stability(groups[-2], groups[-1], config, seed=config.seed + 3,
                                  repetitions=bootstrap_repetitions)
     report = dict(model_version=MODEL_VERSION, source_sha256=source_fingerprint(),
-                  config=config.to_dict(), horizon=config.horizon, runs=runs,
+                  config=config.to_dict(), axis_end_s=histogram([t for g in groups for t in g], config)[-1]["end_s"], runs=runs,
                   state_audits=audit,
                   count_curve_distances=[dict(n=sizes[i], m=sizes[i + 1],
                       distance=count_curve_distance(groups[i], groups[i + 1], config)) for i in range(2)],
@@ -52,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--config", type=Path, default=Path("configs/default.json"))
         command.add_argument("--output", type=Path, default=Path("outputs") / name)
         command.add_argument("--seed", type=int)
+        command.add_argument("--max-time", type=float, help="technical time guard; truncations are incomplete")
+        command.add_argument("--bin-width", type=float, help="output bin width only, independent of movement")
         command.add_argument("--audit", action="store_true", help="check state invariants after each event")
         if name == "run":
             command.add_argument("--trials", type=int)
@@ -63,17 +71,27 @@ def main(argv: list[str] | None = None) -> int:
         config = Config.load(args.config)
         if args.seed is not None:
             config = replace(config, seed=args.seed)
+        if args.max_time is not None:
+            config = replace(config, max_time=args.max_time)
+        if args.bin_width is not None:
+            config = replace(config, bin_width=args.bin_width)
         if args.command == "run":
             if args.trials is not None:
                 config = replace(config, trials=args.trials)
             start = perf_counter()
             trials = simulate(config, validate=args.audit)
             summary = export_run(trials, config, args.output, perf_counter() - start)
-            print(f"{summary['trials']:,} trials; attacks={summary['total_attacks']:,}; mean-attacks={summary['mean_attacks']:.6f}; "
-                  f"no-event={summary['none_probability']:.6f}; output={args.output}")
+            print(f"{summary['trials']:,} attempted; complete={summary['complete_trials']:,}; "
+                  f"incomplete={summary['incomplete_trials']:,}; attacks={summary['total_attacks']:,}; "
+                  f"mean-attacks={summary['mean_attacks']}; output={args.output}")
+            if not summary["all_complete"]:
+                return 2
         else:
             report = run_stability(config, args.sizes, args.output, audit=args.audit,
                                    bootstrap_repetitions=args.bootstrap_repetitions)
+            if report["distance"] is None:
+                print(report["reason"])
+                return 2
             print(f"Stability {'PASS' if report['passed'] else 'FAIL'}: "
                   f"Mean-count curve distance={report['distance']:.6f}, bound={report['threshold_95']:.6f}")
             if not report["passed"]:

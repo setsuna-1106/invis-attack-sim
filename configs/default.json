@@ -1,7 +1,8 @@
 {
   "trials": 10000,
   "seed": 42,
-  "horizon": 1800.0,
+  "max_time": null,
+  "max_events": 100000,
   "bin_width": 5.0,
   "our_team": 0,
   "walk_time": 10.0,
@@ -24,6 +25,11 @@
   "collection_end": 0.3,
   "invis_share_start": 0.2,
   "invis_share_end": 0.7,
+  "collection_floor": 0.2,
+  "invis_share_ceiling": 0.8,
+  "policy_plateau_time": 2160.0,
+  "approach_timeout": 30.0,
+  "engagement_range": 2.5,
   "contested_wait": [
     10.0,
     90.0

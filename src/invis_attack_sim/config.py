@@ -10,7 +10,8 @@ from pathlib import Path
 class Config:
     trials: int = 10_000
     seed: int = 42
-    horizon: float = 1800.0
+    max_time: float | None = None
+    max_events: int = 100_000
     bin_width: float = 5.0
     our_team: int = 0
     walk_time: float = 10.0
@@ -26,6 +27,11 @@ class Config:
     collection_end: float = 0.3
     invis_share_start: float = 0.2
     invis_share_end: float = 0.7
+    collection_floor: float = 0.2
+    invis_share_ceiling: float = 0.8
+    policy_plateau_time: float = 2160.0
+    approach_timeout: float = 30.0
+    engagement_range: float = 2.5
     contested_wait: tuple[float, float] = (10.0, 90.0)
     encounter_wait: tuple[float, float] = (2.0, 5.0)
     break_time: tuple[float, float] = (15.0, 40.0)
@@ -41,22 +47,26 @@ class Config:
     kill_chance: float = 0.6
 
     def __post_init__(self) -> None:
-        for name in ("trials", "seed", "our_team", "potion_cost", "generator_cap"):
+        for name in ("trials", "seed", "our_team", "potion_cost", "generator_cap", "max_events"):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"{name} must be an integer")
         if self.trials < 1 or self.seed < 0 or not 0 <= self.our_team < 4:
             raise ValueError("trials >= 1, seed >= 0 and 0 <= our_team < 4 required")
         if self.potion_cost < 1 or self.generator_cap < 1:
             raise ValueError("potion_cost and generator_cap must be positive")
-        for name in ("horizon", "bin_width", "walk_time", "build_time", "respawn_time", "invis_duration"):
+        if self.max_events < 1:
+            raise ValueError("max_events must be positive")
+        if self.max_time is not None and (isinstance(self.max_time, bool) or not isinstance(self.max_time, (int, float)) or not math.isfinite(self.max_time) or self.max_time <= 0):
+            raise ValueError("max_time must be null or finite and positive (technical guard only)")
+        for name in ("bin_width", "walk_time", "build_time", "respawn_time", "invis_duration", "policy_plateau_time", "approach_timeout", "engagement_range"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if self.horizon > 1800 or not math.isclose(self.horizon / self.bin_width, round(self.horizon / self.bin_width)):
-            raise ValueError("horizon must be <= 1800 and divisible by bin_width")
+        if self.policy_plateau_time <= 1800:
+            raise ValueError("policy_plateau_time must be after 30 minutes")
         if self.build_time < self.walk_time:
             raise ValueError("build_time must include at least walk_time")
-        for name in ("boundary", "collection_start", "collection_end", "invis_share_start", "invis_share_end", "normal_break_chance", "normal_break_chance_end", "invis_break_chance", "invis_break_chance_end", "no_bed_failure_death_multiplier", "death_chance", "pursue_chance", "kill_chance"):
+        for name in ("boundary", "collection_start", "collection_end", "collection_floor", "invis_share_start", "invis_share_end", "invis_share_ceiling", "normal_break_chance", "normal_break_chance_end", "invis_break_chance", "invis_break_chance_end", "no_bed_failure_death_multiplier", "death_chance", "pursue_chance", "kill_chance"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be in [0, 1]")
@@ -81,9 +91,14 @@ class Config:
 
     def weights(self, time: float) -> tuple[float, float, float]:
         # The policy is tied to game time, even for a shorter observation horizon.
-        fraction = min(1.0, max(0.0, time / 1800))
-        collect = self.collection_start + (self.collection_end - self.collection_start) * fraction
-        invis = self.invis_share_start + (self.invis_share_end - self.invis_share_start) * fraction
+        if time <= 1800:
+            fraction = max(0.0, time / 1800)
+            collect = self.collection_start + (self.collection_end - self.collection_start) * fraction
+            invis = self.invis_share_start + (self.invis_share_end - self.invis_share_start) * fraction
+        else:
+            fraction = min(1.0, (time - 1800) / (self.policy_plateau_time - 1800))
+            collect = self.collection_end + (self.collection_floor - self.collection_end) * fraction
+            invis = self.invis_share_end + (self.invis_share_ceiling - self.invis_share_end) * fraction
         return collect, (1 - collect) * (1 - invis), (1 - collect) * invis
 
     def to_dict(self) -> dict:

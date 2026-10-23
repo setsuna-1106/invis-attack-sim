@@ -53,7 +53,7 @@ def plot_density(rows: list[dict], summary: dict, output: Path) -> None:
         titles = ("不同时刻受到隐身攻击的事件密度（计入所有次数）",
                   f"各 {width:g} 秒区间内至少受到一次隐身攻击的概率")
         ylabels = ("攻击事件密度［次 /（局·秒）］", "至少一次攻击的概率")
-        note = (f"模拟 {summary['trials']:,} 局 · 分箱 {width:g} 秒\n"
+        note = (f"模拟 {summary['complete_trials']:,} 局 · 分箱 {width:g} 秒\n"
                 f"每局平均 {summary['mean_attacks']:.3f} 次 · "
                 f"零攻击对局 {summary['none_probability']:.2%}")
     else:
@@ -61,7 +61,7 @@ def plot_density(rows: list[dict], summary: dict, output: Path) -> None:
         titles = ("Invisible attack intensity over time (all attacks)",
                   f"Probability of at least one invisible attack per {width:g}s interval")
         ylabels = ("Attack intensity (attacks / trial / s)", "Probability of at least one attack")
-        note = (f"N={summary['trials']:,} | bin={width:g}s\n"
+        note = (f"N={summary['complete_trials']:,} | bin={width:g}s\n"
                 f"Mean attacks={summary['mean_attacks']:.3f} | "
                 f"Zero-attack trials={summary['none_probability']:.2%}")
     series = ([row["density_per_s"] for row in rows],
@@ -95,38 +95,63 @@ def export_run(trials: list[Trial], config: Config, output: Path,
     if len(trials) != config.trials:
         raise ValueError("trial count does not match configuration")
     rows = histogram(trials, config)
-    none = sum(not trial.attacks for trial in trials)
-    total_attacks = sum(len(trial.attacks) for trial in trials)
-    mean_attacks = total_attacks / len(trials)
-    integral = sum(row["density_per_s"] * config.bin_width for row in rows)
-    if not math.isclose(integral, mean_attacks, rel_tol=1e-12, abs_tol=1e-12):
-        raise RuntimeError("attack intensity integral must equal mean attacks per trial")
-    summary = dict(schema_version=2, model_version=MODEL_VERSION, source_sha256=source_fingerprint(),
+    complete = [t for t in trials if t.complete]
+    n = len(complete)
+    none = sum(not trial.attacks for trial in complete)
+    total_attacks = sum(len(trial.attacks) for trial in complete)
+    mean_attacks = total_attacks / n if n else None
+    integral = sum(row["density_per_s"] * config.bin_width for row in rows) if n else None
+    if n and not math.isclose(integral, mean_attacks, rel_tol=1e-12, abs_tol=1e-12):
+        raise RuntimeError("attack intensity integral must equal mean attacks per complete trial")
+    summary = dict(schema_version=3, model_version=MODEL_VERSION, source_sha256=source_fingerprint(),
                    python_version=platform.python_version(), config=config.to_dict(),
-                   trials=len(trials), seed=config.seed, total_attacks=total_attacks,
-                   attacked_trials=len(trials) - none, zero_attack_trials=none,
-                   mean_attacks=mean_attacks, none_probability=none / len(trials),
-                   ever_attacked_probability=1 - none / len(trials),
-                   density_integral=integral,
-                   probability_total=(len(trials) - none) / len(trials) + none / len(trials),
+                   trials=len(trials), complete_trials=n, incomplete_trials=len(trials) - n,
+                   all_complete=n == len(trials), seed=config.seed, total_attacks=total_attacks,
+                   attempted_total_attacks=sum(len(t.attacks) for t in trials),
+                   attacked_trials=n - none, zero_attack_trials=none,
+                   mean_attacks=mean_attacks, none_probability=none / n if n else None,
+                   ever_attacked_probability=1 - none / n if n else None,
+                   density_integral=integral, probability_total=1.0 if n else None,
+                   event_stages=dict(Counter(a.stage for t in complete for a in t.attacks)),
+                   continued_pursuits=sum(a.continued_pursuit for t in complete for a in t.attacks),
+                   observation_end_s=max((t.stop_time for t in complete), default=None),
+                   axis_end_s=rows[-1]["end_s"] if rows else None,
                    stop_reasons=dict(Counter(t.stop_reason for t in trials)),
+                   excluded_reasons=dict(Counter(t.stop_reason for t in trials if not t.complete)),
                    runtime_seconds=elapsed,
-                   intensity_definition="All attacks in a bin / (all trials * bin width). Integral is mean attack count, not a probability. hit_probability counts each trial at most once per bin.",
-                   interpretation="Continue after every attack; stop at own bed loss, elimination, game end or horizon. Simplified model, not calibrated to real matches.")
+                   intensity_definition="All valid events / (complete trials * full bin width). Integral is mean count, not probability; each episode counts once. Incomplete trials excluded, never zero-filled.",
+                   interpretation="Observe until own elimination or game end, including after bed loss and 30 min. Technical guards are incomplete. Simplified model; not calibrated to real matches.")
     output.mkdir(parents=True, exist_ok=True)
-    write_csv(output / "histogram.csv", rows, list(rows[0]))
-    write_csv(output / "trials.csv", (dict(trial_id=trial.trial_id, attack_count=len(trial.attacks),
-              first_attack_time=trial.event_time, last_attack_time=trial.attacks[-1].time if trial.attacks else None,
-              stop_time=trial.stop_time, stop_reason=trial.stop_reason) for trial in trials),
-              ["trial_id", "attack_count", "first_attack_time", "last_attack_time", "stop_time", "stop_reason"])
-    write_csv(output / "attacks.csv", (dict(trial_id=trial.trial_id, attack_number=number,
-              time_s=attack.time, attacker=attack.attacker) for trial in trials
-              for number, attack in enumerate(trial.attacks, 1)),
-              ["trial_id", "attack_number", "time_s", "attacker"])
+    histogram_fields = list(rows[0]) if rows else ["start_s", "end_s", "count", "mean_count", "density_per_s", "base_count", "pursuit_count", "base_density_per_s", "pursuit_density_per_s", "attacker_bed_count", "attacker_no_bed_count", "complete_trials", "hit_trials", "hit_probability"]
+    write_csv(output / "histogram.csv", rows, histogram_fields)
+    write_csv(output / "trials.csv", (dict(trial_id=t.trial_id, complete=t.complete, attack_count=len(t.attacks),
+              first_attack_time=t.event_time, last_attack_time=t.attacks[-1].time if t.attacks else None,
+              bed_loss_time=t.bed_loss_time, stop_time=t.stop_time, stop_reason=t.stop_reason) for t in trials),
+              ["trial_id", "complete", "attack_count", "first_attack_time", "last_attack_time", "bed_loss_time", "stop_time", "stop_reason"])
+    write_csv(output / "attacks.csv", (dict(trial_id=t.trial_id, complete=t.complete, attack_number=number,
+              time_s=a.time, attacker=a.attacker, episode=a.episode, stage=a.stage,
+              own_bed=a.stage == "base", attacker_bed=a.attacker_bed,
+              continued_pursuit=a.continued_pursuit) for t in trials for number, a in enumerate(t.attacks, 1)),
+              ["trial_id", "complete", "attack_number", "time_s", "attacker", "episode", "stage", "own_bed", "attacker_bed", "continued_pursuit"])
     write_json(output / "config.json", config.to_dict())
     write_json(output / "summary.json", summary)
     if plot:
-        plot_density(rows, summary, output)
+        if rows:
+            plot_density(rows, summary, output)
+        else:
+            # A missing complete sample is not a zero-density curve. Also
+            # replace old figures if the output directory is reused.
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(9, 4))
+            ax.axis("off")
+            ax.text(.5, .5, "No complete trials.\nPrimary estimates unavailable; inspect guard reasons.",
+                    ha="center", va="center")
+            for name in ("density", "attack_density", "interval_probability"):
+                for ext in ("png", "svg"):
+                    fig.savefig(output / f"{name}.{ext}")
+            plt.close(fig)
     return summary
 
 
@@ -138,12 +163,13 @@ def plot_stability(groups: list[list[Trial]], report: dict, output: Path) -> Non
     fig, ax = plt.subplots(figsize=(9, 5), layout="constrained")
     for trials, run in zip(groups, report["runs"]):
         config = Config(**report["config"])
-        edges = [i * config.bin_width / 60 for i in range(round(config.horizon / config.bin_width) + 1)]
-        ax.step(edges, [0] + mean_count_curve(trials, config),
+        curve = mean_count_curve(trials, config, end_time=report["axis_end_s"])
+        edges = [i * config.bin_width / 60 for i in range(len(curve) + 1)]
+        ax.step(edges, [0] + curve,
                 where="post", label=f"N={len(trials):,}, seed={run['seed']}", linewidth=1.1)
     ax.set(xlabel="Time since game start (min)", ylabel="Mean cumulative attack count per trial",
            title=f"All-attack Monte Carlo stability: {'PASS' if report['passed'] else 'FAIL'}",
-           xlim=(0, report["horizon"] / 60), ylim=(0, None))
+           xlim=(0, report["axis_end_s"] / 60), ylim=(0, None))
     ax.legend(loc="lower right")
     ax.grid(alpha=.2)
     fig.savefig(output / "stability.png", dpi=160)

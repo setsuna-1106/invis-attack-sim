@@ -32,6 +32,11 @@ class EngineTests(unittest.TestCase):
     def at_middle(self, game, team, action='collect', emeralds=0):
         p = game.players[team]
         p.route, p.x, p.action, p.emeralds = None, 0.0, action, emeralds
+        if action in ('normal', 'invis'):
+            p.episode = next(game.episodes)
+            p.raid_kind = action
+        if action == 'invis':
+            p.potion = True
         return p
 
     def test_no_bed_preference_preserves_collect_and_total_attack(self):
@@ -90,7 +95,10 @@ class EngineTests(unittest.TestCase):
         p.bed, p.action, p.target = False, 'normal', 2
         target.bed = False
         with patch.object(game.rng, 'random', return_value=.55):
-            game.resolve_pursuit(p)
+            game.bridges = [True] * 4
+            p.route, p.x = target.route, target.x
+            game.start_fight(p, target)
+            game.resolve_fight(p.fight)
         self.assertTrue(target.eliminated)
         self.assertTrue(p.alive)
 
@@ -173,19 +181,20 @@ class EngineTests(unittest.TestCase):
         breaker.action, breaker.target = 'normal', 0
         game.schedule(2.5, 1, 'break', 2, breaker.version)
         advance(game, 2.5)
-        self.assertEqual(game.result.stop_reason, 'bed_destroyed')
-        self.assertIsNone(game.result.event_time)
+        self.assertIsNone(game.result)
+        self.assertFalse(game.players[0].bed)
+        self.assertEqual(game.attacks, [])
 
-    def test_horizon_crossing_counts(self):
-        game = self.game(horizon=5)
+    def test_after_30_minutes_crossing_counts(self):
+        game = self.game()
         game.bridges[0] = True
-        game.time = 2.5
+        game.time = 2402.5
         p = self.at_middle(game, 1, 'invis')
         p.target = 0
         game.continue_action(p, 'raid_middle')
-        advance(game, 5)
+        advance(game, 2405)
         self.assertIsNone(game.result)
-        self.assertEqual(game.attacks[0].time, 5)
+        self.assertEqual(game.attacks[0].time, 2405)
 
     def test_solo_collects_all_even_if_already_enough(self):
         game = self.game()
@@ -257,7 +266,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(winners, {1, 2, 3})
 
     def test_spawn_clock_upgrades_cap_and_pickup_dont_reset(self):
-        game = self.game(horizon=1800)
+        game = self.game(max_time=1800)
         game.schedule(56, 0, 'spawn')
         game.schedule(360, -1, 'upgrade', data=1)
         game.schedule(1080, -1, 'upgrade', data=2)
@@ -315,7 +324,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(p.alive)
         self.assertFalse(any(e[4] == 'respawn' for e in game.queue))
 
-    def test_break_after_expiry_uses_invis_success_and_can_pursue(self):
+    def test_break_after_expiry_keeps_break_chance_but_cannot_pursue(self):
         game = self.game(invis_break_chance=1, invis_break_chance_end=1,
                          normal_break_chance=0, normal_break_chance_end=0, pursue_chance=1)
         p = game.players[1]
@@ -323,9 +332,9 @@ class EngineTests(unittest.TestCase):
         game.time = 40
         game.resolve_break(p)
         self.assertFalse(game.players[2].bed)
-        self.assertEqual(p.target, 2)
-        self.assertEqual(p.action, 'pursuit')
-        self.assertTrue(any(e[4] == 'pursuit' for e in game.queue))
+        self.assertIsNone(p.target)
+        self.assertEqual(p.action, 'return')
+        self.assertFalse(any(e['kind'] == 'tracking' for e in game.trace))
 
     def test_failed_break_ends_raid_and_resource_recipient_must_be_alive(self):
         game = self.game(normal_break_chance=0, normal_break_chance_end=0, death_chance=1)
@@ -337,21 +346,24 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(game.players[2].emeralds, 0)
         self.assertFalse(any(e[4] == 'break' for e in game.queue))
 
-    def test_target_bed_loss_cancels_invis_but_not_normal_travel(self):
+    def test_target_bed_loss_converts_both_raids_from_current_position(self):
         game = self.game()
         game.bridges = [True] * 4
         for team, action in ((1, 'invis'), (3, 'normal')):
             p = game.players[team]
             p.action, p.target = action, 2
+            p.potion = action == 'invis'
             game.move(p, team, 0, 'raid_middle')
         game.time = 4
         game.players[2].bed = False
         game.invalidate_targets(2)
-        self.assertEqual(game.players[1].action, 'return')
-        self.assertAlmostEqual(game.players[1].motion.end, 8)
+        for p in (game.players[1], game.players[3]):
+            self.assertEqual(p.approach_deadline, 34)
+            self.assertAlmostEqual(game.position(p)[1], .6)
+        self.assertEqual(game.players[1].invis_until, 34)
         self.assertEqual(game.players[3].action, 'normal')
 
-    def test_pursuit_does_not_freeze_target_and_kill_cancels_old_motion(self):
+    def test_pursuit_only_freezes_target_at_contact_and_cancels_old_motion(self):
         game = self.game(kill_chance=1, pursuit_time=(5, 5))
         game.bridges = [True] * 4
         p = game.players[1]
@@ -361,11 +373,14 @@ class EngineTests(unittest.TestCase):
         game.move(target, 2, 0, 'raid_middle')
         game.start_pursuit(p)
         advance(game, 5)
-        self.assertTrue(target.eliminated)
-        self.assertIsNone(target.motion)
-        self.assertEqual(p.emeralds, 7)
+        self.assertTrue(target.alive)
+        self.assertIsNotNone(target.motion)
         advance(game, 10)
-        self.assertFalse(target.alive)
+        self.assertIsNone(target.motion)
+        self.assertIsNotNone(target.fight)
+        advance(game, 15)
+        self.assertTrue(target.eliminated)
+        self.assertEqual(p.emeralds, 7)
 
     def test_actions_mask_invalid_targets_and_charge_one_potion(self):
         game = Game(Config(collection_start=0, collection_end=0,
@@ -388,7 +403,7 @@ class EngineTests(unittest.TestCase):
         self.assertNotEqual(first, simulate(replace(config, seed=43)))
         mean_attacks = sum(len(t.attacks) for t in first) / len(first)
         self.assertAlmostEqual(sum(r['mean_count'] for r in histogram(first, config)), mean_attacks)
-        self.assertTrue(all(0 <= t.stop_time <= config.horizon for t in first))
+        self.assertTrue(all(t.stop_time >= 0 and t.complete for t in first))
         self.assertTrue(all(a.attacker != config.our_team for t in first for a in t.attacks))
         self.assertTrue(all(a.time <= t.stop_time for t in first for a in t.attacks))
         self.assertTrue(all(t.stop_reason != "attack" for t in first))
@@ -405,18 +420,20 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(game.attacks), 2)
         self.assertEqual({a.attacker for a in game.attacks}, {1, 2})
         p = game.players[1]
-        game.cross(p, p.motion.token)
+        game.sync_spatial()
         self.assertEqual(len(game.attacks), 2)
         game.players[0].bed = False
         game.check_stop()
-        self.assertEqual(game.result.stop_reason, 'bed_destroyed')
+        self.assertIsNone(game.result)
+        game.kill(game.players[0])
+        self.assertEqual(game.result.stop_reason, 'eliminated')
         self.assertEqual(len(game.result.attacks), 2)
 
-    def test_full_match_retains_repeat_attacks_until_horizon(self):
-        config = Config(trials=10, normal_break_chance=0, normal_break_chance_end=0,
+    def test_guard_retains_repeat_attacks_but_is_incomplete(self):
+        config = Config(trials=10, max_time=1800, normal_break_chance=0, normal_break_chance_end=0,
                         invis_break_chance=0, invis_break_chance_end=0)
         trials = simulate(config, validate=True)
-        self.assertTrue(all(t.stop_reason == 'horizon' for t in trials))
+        self.assertTrue(all(t.stop_reason == 'time_guard' and not t.complete for t in trials))
         self.assertTrue(any(len(t.attacks) > 1 for t in trials))
         self.assertTrue(any(len({a.attacker for a in t.attacks}) < len(t.attacks) for t in trials))
 
